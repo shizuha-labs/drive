@@ -1,0 +1,100 @@
+# DRV-50: migration drift gate — fails when model changes exist that no
+# migration captures (`makemigrations --check`). Keeps drift from silently
+# accumulating until an unrelated `makemigrations` sweeps someone else's
+# operations into the wrong migration. Separate workflow on purpose: a
+# drift failure must not block deploy.yml's build/rollout path.
+name: migration-drift-check
+on:
+  workflow_dispatch: {}
+  pull_request: {}
+  push:
+    branches: [main, master]
+concurrency:
+  group: migration-drift-check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  makemigrations-check:
+    # DRV-68/ORIG-76: keep this short main-branch gate off the shared
+    # ubuntu-latest lane while codex cross-compile jobs can starve it for hours.
+    # The dedicated deploy-lane runner is already live; this workflow is small
+    # and latency-sensitive because Prometheus pages when it has no fresh green.
+    runs-on: deploy-lane
+    steps:
+      - uses: actions/checkout@v4
+      - name: makemigrations --check --dry-run
+        run: |
+          set -euo pipefail
+          # settings.py configures a FileHandler at /var/log/django/drive.log;
+          # dictConfig instantiates it on startup, so the dir must exist.
+          mkdir -p /var/log/django 2>/dev/null || sudo mkdir -p /var/log/django
+          chmod 777 /var/log/django 2>/dev/null || sudo chmod 777 /var/log/django
+          command -v python3 >/dev/null || { apt-get -o Acquire::http::Proxy=http://apt-cache.registry.svc.cluster.local:3142 update -qq && apt-get -o Acquire::http::Proxy=http://apt-cache.registry.svc.cluster.local:3142 install -y -qq python3 python3-venv; }
+          UV_BOOTSTRAP="$(mktemp -d)"
+          trap 'rm -rf "$UV_BOOTSTRAP"' EXIT
+          python3 -m venv "$UV_BOOTSTRAP"
+          timeout 300 "$UV_BOOTSTRAP/bin/pip" install \
+            --index-url http://pip-cache.registry.svc.cluster.local/simple \
+            --trusted-host pip-cache.registry.svc.cluster.local \
+            --timeout 120 --retries 1 --quiet uv==0.11.26
+          # A frozen project sync follows files.pythonhosted.org artifact URLs
+          # embedded in uv.lock even when the runner exports an internal index.
+          # Preserve the exact lock as hash-pinned requirements, then install
+          # those names through the shared cache (same contract as deploy.yml).
+          "$UV_BOOTSTRAP/bin/uv" export --quiet --frozen --no-dev --no-emit-project \
+            --format requirements.txt --output-file /tmp/ci-requirements.txt
+          rm -rf .venv
+          "$UV_BOOTSTRAP/bin/uv" venv --python python3 .venv
+          timeout 600 env UV_CACHE_DIR=/tmp/uvc UV_HTTP_TIMEOUT=60 \
+            UV_HTTP_RETRIES=10 UV_CONCURRENT_DOWNLOADS=4 \
+            "$UV_BOOTSTRAP/bin/uv" pip sync \
+            --python .venv/bin/python --require-hashes \
+            /tmp/ci-requirements.txt \
+            --index-url http://pip-cache.registry.svc.cluster.local/simple \
+            --allow-insecure-host pip-cache.registry.svc.cluster.local
+          # State-based check only — no database connection needed (the
+          # "consistent migration history" probe warns and continues).
+          # This offline model-state check needs its own disposable signing key.
+          export SECRET_KEY="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          export POSTGRES_PASSWORD="$(.venv/bin/python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          .venv/bin/python manage.py makemigrations --check --dry-run
+
+  frontend-build:
+    # PLAT-6702: the nanoid 3→5 major bump (security-sensitive, PLAT-1305)
+    # must be proven green at head. The frontend is built in the deploy
+    # pipeline only, so a PR touching frontend deps had no Origin build
+    # evidence. This job runs the exact CI build (node:20-alpine + the
+    # @shizuha/ui vite.shared.js shim) on every PR and main push.
+    runs-on: deploy-lane
+    container:
+      image: node:20-alpine
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Frontend production build (nanoid 3→5 major bump evidence)
+        run: |
+          set -eu
+          cd frontend
+          npm ci --no-audit --no-fund
+          # Shim /packages/shizuha-ui/vite.shared.js for standalone CI builds
+          # (mirrors frontend/Dockerfile.ci).
+          mkdir -p /packages/shizuha-ui
+          cat > /packages/shizuha-ui/vite.shared.js <<'JS'
+          export function createShizuhaConfig({port, serviceName}){
+            const basePath=process.env.VITE_BASE_PATH||"/";
+            const allowedHosts=["localhost","shizuha-"+serviceName+"-frontend","nginx",
+              "shizuha-nginx","shizuha-nginx-dev",".shizuha.com",
+              "shizuha-shizuha-"+serviceName+"-frontend",".svc.cluster.local"];
+            return {base:basePath,optimizeDeps:{include:["lucide-react"]},
+              server:{host:"0.0.0.0",port,allowedHosts,
+                hmr:process.env.VITE_HMR_DISABLE==="true"?false:true,
+                watch:{usePolling:true}},
+              build:{outDir:"dist",sourcemap:true}};
+          }
+          export default createShizuhaConfig;
+          JS
+          # Prove the postcss CJS require of nanoid/non-secure survives the
+          # nanoid 5 ESM-only override (the PLAT-6702 P1 concern).
+          node -e "const {nanoid}=require('nanoid/non-secure'); if(!nanoid(6)) process.exit(1); console.log('nanoid/non-secure require OK')"
+          VITE_BASE_PATH=/ VITE_API_BASE=/api VITE_HMR_DISABLE=true NODE_ENV=production npm run build

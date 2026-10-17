@@ -1,0 +1,44 @@
+[project]
+name = "shizuha-drive"
+version = "0.1.0"
+description = "Shizuha Drive file service"
+requires-python = ">=3.10"
+dependencies = [
+    "Django>=5.2,<5.3",
+    "djangorestframework>=3.14",
+    "django-cors-headers>=4.0",
+    "django-filter>=23.0",
+    "gunicorn>=21.0",
+    "djangorestframework-simplejwt>=5.3",
+    "PyJWT>=2.15.1",
+    "cryptography>=50.0.0",  # GHSA-g6cj-pr64-35w5 / CVE-2026-69247
+    "psycopg2-binary>=2.9",
+    "celery>=5.3",
+    "redis>=5.0",
+    "drf-spectacular>=0.26",
+    "python-magic>=0.4.27",
+    "Pillow>=10.0",
+    "pypdf>=6.15.0",
+    "boto3>=1.28",
+    "django-storages>=1.14",
+    "pytest>=7.4",
+    "pytest-django>=4.5",
+    "pytest-cov>=4.1",
+    "factory-boy>=3.3",
+    "requests>=2.31",
+    # Security floors (PLAT-4304 GHSA-vqfr-h8mv-ghfj / PLAT-4305 GHSA-65pc-fj4g-8rjx):
+    # transitive via requests/mcp/sphinx toolchains — pin the patched minimums explicitly.
+    "h11>=0.16.0",
+    "idna>=3.15",
+    "python-dotenv>=1.0",
+    "sphinx>=7.0",
+    "sphinx-rtd-theme>=2.0",
+    "sphinxcontrib-httpdomain>=1.8",
+    "myst-parser>=2.0",
+    "sphinx-copybutton>=0.5",
+    "mcp>=2.0.0",
+    "python-multipart>=0.0.32",
+]
+
+[tool.uv]
+package = false

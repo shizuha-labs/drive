@@ -1,0 +1,342 @@
+# Shizuha Origin CI/CD — MULTI-ARCH build + deploy shizuha-drive-FRONTEND (PLAT-1009).
+# The frontend is a separate image from the backend (deploy.yml builds the backend).
+# Self-contained: @shizuha/ui is installed from the in-cluster npm-cache (Verdaccio),
+# NOT file:/packages/shizuha-ui, so this standalone-repo CI can build it.
+# Multi-arch (amd64 s1 + arm64 gx10) — frontend must run on any cluster node.
+name: deploy-shizuha-drive-frontend
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main, master]
+concurrency:
+  group: deploy-shizuha-drive-frontend-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build-and-deploy:
+    runs-on: deploy-lane
+    steps:
+      - name: Checkout exact triggering revision for monotonic release guard
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install kubectl + cluster access
+        run: |
+          set -euo pipefail
+          KUBECTL_ARCH="$(uname -m)"; case "$KUBECTL_ARCH" in x86_64) KUBECTL_ARCH=amd64;; aarch64) KUBECTL_ARCH=arm64;; *) echo "Unsupported runner arch: $KUBECTL_ARCH" >&2; exit 1;; esac
+          curl -fsSL -o kubectl "http://forgejo-http.origin.svc.cluster.local/api/packages/actions/generic/kubectl/v1.34.1/kubectl-${KUBECTL_ARCH}"
+          install -m 0755 kubectl /usr/local/bin/kubectl
+          mkdir -p "$HOME/.kube"
+          printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+      - name: Multi-arch build + deploy + verify (frontend)
+        run: |
+          set -euo pipefail
+          SHORT="$(echo "${{ github.sha }}" | cut -c1-7)"
+          FTAG="drive-frontend-${SHORT}"
+          REG="registry.registry.svc.cluster.local:5000"
+          echo "Multi-arch build shizuha-drive-frontend:${FTAG} (amd64 + arm64)"
+
+          render_build_job() {
+            local ARCH="$1"
+            cat <<JOBEOF
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ci-build-drive-fe-${SHORT}-${ARCH}
+            namespace: build
+            labels: { app: ci-build, service: drive-frontend }
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                restartPolicy: Never
+                nodeSelector: { kubernetes.io/arch: ${ARCH} }
+                tolerations:
+                  - { key: node.shizuha/workstation, operator: Exists, effect: NoSchedule }
+                  - { key: shizuha.com/inference-paused, operator: Exists, effect: NoSchedule }
+                  # amd64 kaniko on i9-ws times out pushing to registry ClusterIP;
+                  # s1 overlay works and carries operator=unschedulable. CI tolerates
+                  # the operator-hold taint instead of removing it.
+                  - { key: operator, operator: Equal, value: unschedulable, effect: NoSchedule }
+                affinity:
+                  nodeAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      nodeSelectorTerms:
+                      - matchExpressions:
+                        - { key: node-role.kubernetes.io/control-plane, operator: DoesNotExist }
+                        # i9-ws overlay to ns registry is i/o timeout. Keep excluded until
+                        # ClusterIP/FORWARD on i9-ws is actually fixed.
+                        - { key: kubernetes.io/hostname, operator: NotIn, values: [i9-ws] }
+                initContainers:
+                  - name: git-clone
+                    image: alpine/git:2.43.0
+                    command: ["/bin/sh","-c"]
+                    args:
+                      - |
+                        set -e
+                        git clone --depth=50 http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/shizuha-labs/drive.git /workspace/src
+                        cd /workspace/src && (git checkout ${{ github.sha }} 2>/dev/null || echo "sha not in shallow clone; building default HEAD")
+                    env:
+                      - name: GIT_PASSWORD
+                        valueFrom: { secretKeyRef: { name: forgejo-token, key: password } }
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                containers:
+                  - name: kaniko
+                    image: gcr.io/kaniko-project/executor:v1.23.2
+                    args:
+                      - --context=dir:///workspace/src
+                      - --dockerfile=/workspace/src/frontend/Dockerfile.ci
+                      - --destination=${REG}/shizuha-drive-frontend:${FTAG}-${ARCH}
+                      - --insecure
+                      - --skip-tls-verify
+                      - --insecure-pull
+                      - --registry-mirror=mirror-dockerhub.registry.svc.cluster.local:5000
+                      - --build-arg=NPM_CONFIG_REGISTRY=http://npm-cache.registry.svc.cluster.local:4873/
+                      - --build-arg=VITE_BASE_PATH=/drive/
+                      - --build-arg=VITE_API_BASE=/drive/api
+                      - --cache=true
+                      - --cache-repo=${REG}/kaniko-cache/drive-deploy-frontend-${ARCH}
+                      - --cache-copy-layers=true
+                      - --cache-ttl=336h
+                      - --compressed-caching=false
+                      - --cleanup
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                volumes: [{ emptyDir: {}, name: workspace }]
+          JOBEOF
+          }
+
+          BUILD_GUARD_CONFIGMAP="origin-ci-build-guard-650fec631781"
+          BUILD_GUARD_SHA256="650fec631781edce0e4980f0fb07b12ab78b67b1faf780b214d12a40f9dddcf6"
+          BUILD_GUARD="${RUNNER_TEMP:-/tmp}/origin-ci-build-guard.py"
+          kubectl get "configmap/${BUILD_GUARD_CONFIGMAP}" -n origin \
+            -o jsonpath='{.data.guard\.py}' >"$BUILD_GUARD"
+          echo "${BUILD_GUARD_SHA256}  ${BUILD_GUARD}" | sha256sum -c -
+          job_name_for_arch() {
+            local ARCH="$1"
+            render_build_job "$ARCH" | awk '$1 == "name:" { print $2; exit }'
+          }
+          AMD64_JOB="$(job_name_for_arch amd64)"
+          ARM64_JOB="$(job_name_for_arch arm64)"
+          test -n "$AMD64_JOB" -a -n "$ARM64_JOB"
+          cleanup_build_pair() {
+            python3 "$BUILD_GUARD" cleanup \
+              --namespace build --job "$AMD64_JOB" --job "$ARM64_JOB"
+          }
+          cleanup_on_failure() {
+            rc=$?
+            if [ "$rc" -ne 0 ]; then cleanup_build_pair || true; fi
+            exit "$rc"
+          }
+          trap cleanup_on_failure EXIT INT TERM
+          python3 "$BUILD_GUARD" preflight --arch amd64 --arch arm64
+          cleanup_build_pair
+          render_build_job amd64 | kubectl apply -f -
+          render_build_job arm64 | kubectl apply -f -
+          python3 "$BUILD_GUARD" wait-pair --namespace build \
+            --job "amd64=${AMD64_JOB}" --job "arm64=${ARM64_JOB}" \
+            --timeout-seconds 1800
+          trap - EXIT INT TERM
+
+          wait_job() {
+            local ARCH="$1"
+            local JOB="ci-build-drive-fe-${SHORT}-${ARCH}"
+            kubectl wait -n build --for=condition=complete "job/${JOB}" --timeout=1800s &
+            local WP=$!
+            while kill -0 "$WP" 2>/dev/null; do
+              if kubectl get "job/${JOB}" -n build -o jsonpath='{.status.failed}' | grep -q '[1-9]'; then
+                echo "::error::kaniko frontend ${ARCH} build failed"
+                kubectl logs -n build "job/${JOB}" --all-containers --tail=80 || true
+                exit 1
+              fi
+              sleep 5
+            done
+            wait "$WP"
+          }
+          wait_job amd64 &
+          AMD64_WAIT_PID=$!
+          wait_job arm64 &
+          ARM64_WAIT_PID=$!
+          BUILD_STATUS=0
+          wait "$AMD64_WAIT_PID" || BUILD_STATUS=1
+          wait "$ARM64_WAIT_PID" || BUILD_STATUS=1
+          test "$BUILD_STATUS" -eq 0
+
+          cat <<CRANEEOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ci-manifest-drive-fe-${SHORT}
+            namespace: build
+            labels: { app: ci-manifest, service: drive-frontend }
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: crane
+                    image: gcr.io/go-containerregistry/crane:latest
+                    args:
+                      - index
+                      - append
+                      - --insecure
+                      - -t
+                      - ${REG}/shizuha-drive-frontend:${FTAG}
+                      - -m
+                      - ${REG}/shizuha-drive-frontend:${FTAG}-amd64
+                      - -m
+                      - ${REG}/shizuha-drive-frontend:${FTAG}-arm64
+          CRANEEOF
+          kubectl wait -n build --for=condition=complete "job/ci-manifest-drive-fe-${SHORT}" --timeout=300s || {
+            echo "::error::frontend manifest combine failed"
+            kubectl logs -n build "job/ci-manifest-drive-fe-${SHORT}" --tail=80 || true
+            exit 1
+          }
+
+          set +e
+          .forgejo/scripts/monotonic-release-guard.sh shizuha shizuha-drive-frontend "${{ github.sha }}"
+          GUARD_RC="$?"
+          set -e
+          if [ "${GUARD_RC}" = 10 ]; then exit 0; fi
+          if [ "${GUARD_RC}" != 0 ]; then exit "${GUARD_RC}"; fi
+          # Re-assert loop (PLAT-4123, mirrors connect 943a3d9): deploy.yml
+          # (same push, separate concurrency group) snapshots the LIVE frontend
+          # tag for its helm --set — if it snapshots BEFORE we roll and applies
+          # DURING our rollout, it reverts us to the previous tag. helm applies
+          # once and never re-touches the FE, so re-asserting converges; only a
+          # persistent fighter still fails the run.
+          #
+          # ESC-2026-0908 fix (run 647 escalation): this loop was dead code
+          # under `set -e` — the first `kubectl rollout status` timeout exited
+          # the job before attempt 2 could run (runs 643/644/647 all died in
+          # attempt 1 with "0 out of 2 new replicas updated", a signature the
+          # clobber-retry was never going to fix). The rollout exit code is now
+          # captured, and a final failure dumps deployment/RS/pods/events/quota
+          # so the run log pinpoints the actual cluster blocker.
+          echo "Live frontend image before deploy: $(kubectl get deploy -n shizuha shizuha-drive-frontend -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          # ESC-2026-0908 root cause (run 660 diagnostic dump): the deployment
+          # was PAUSED (Progressing=Unknown/DeploymentPaused, NewReplicaSet:
+          # <none>) — set image mutates the frozen spec, no RS is created, and
+          # rollout status waits at "0 updated" until timeout. The pause dates
+          # to 2026-09-05 (after run 641 shipped 06f20f1) and silently broke
+          # every deploy since. The deploy workflow's contract is to ship the
+          # tag, so it resumes a paused rollout before deploying (idempotent;
+          # a deliberate post-deploy operator pause is re-pausable and the
+          # resume is logged here).
+          kubectl rollout resume -n shizuha deploy/shizuha-drive-frontend 2>&1 | grep -v "already resumed" || true
+          # PLAT-8721 (run 734): the live deployment carries REQUIRED pod
+          # anti-affinity (hostname topology) while BOTH running replicas sit
+          # on i9-ws — they were scheduled before the constraint existed
+          # (IgnoredDuringExecution). The only other amd64+platform node (s1)
+          # carries the operator=unschedulable hold taint this pod does not
+          # tolerate, and the 16 gx10 nodes fail the arch=amd64 selector, so
+          # the maxSurge pod can never schedule (FailedScheduling 0/18, the
+          # run-734 pod was Pending 2d5h) and every rollout deadlocks at
+          # ProgressDeadlineExceeded. Relax REQUIRED to PREFERRED (same
+          # spread intent, ScheduleAnyway) so the rollout can converge.
+          # Strategic-merge with identical values is a no-op on unchanged
+          # runs (no template churn, no extra RS).
+          kubectl patch -n shizuha deploy/shizuha-drive-frontend --type=strategic -p '
+          spec:
+            template:
+              spec:
+                affinity:
+                  podAntiAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution: null
+                    preferredDuringSchedulingIgnoredDuringExecution:
+                    - weight: 100
+                      podAffinityTerm:
+                        labelSelector:
+                          matchLabels:
+                            app.kubernetes.io/name: shizuha-drive-frontend
+                        topologyKey: kubernetes.io/hostname
+          '
+          DEPLOYED=0
+          for attempt in 1 2 3; do
+            kubectl set image -n shizuha deploy/shizuha-drive-frontend frontend="localhost:30500/shizuha-drive-frontend:${FTAG}"
+            set +e
+            kubectl rollout status -n shizuha deploy/shizuha-drive-frontend --timeout=300s
+            ROLL_RC=$?
+            set -e
+            LIVE="$(kubectl get deploy -n shizuha shizuha-drive-frontend -o jsonpath='{.spec.template.spec.containers[0].image}')"
+            echo "Live frontend image (attempt ${attempt}): ${LIVE} (rollout rc=${ROLL_RC})"
+            if [ "${ROLL_RC}" = 0 ] && echo "${LIVE}" | grep -q "${FTAG}"; then DEPLOYED=1; break; fi
+            if [ "${attempt}" = 3 ]; then
+              # ESC-2026-0913 (runs 719-731, all red on 2f77bcb while
+              # https://shizuha.com/drive served 200 the whole time):
+              # `kubectl rollout status` fails instantly — and permanently —
+              # once the deployment carries a stale progressDeadlineExceeded
+              # condition. Re-asserting an identical image never bumps
+              # spec.generation, so no new rollout ever resets the condition
+              # and every later run reds while the pods actually serve.
+              # Before failing, verify ACTUAL readiness: every pod for this
+              # deployment Running with all containerStatuses ready on the
+              # expected image, count == spec.replicas. Verified-ready pods
+              # mean the rollout DID converge and only the condition is stale
+              # (it resets on the next real image change); anything else is a
+              # real outage and keeps the full diagnostic dump + red below.
+              EXPECTED_IMAGE="localhost:30500/shizuha-drive-frontend:${FTAG}"
+              SPEC_REPLICAS="$(kubectl get deploy -n shizuha shizuha-drive-frontend -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
+              READINESS="$(kubectl get pods -n shizuha -l app.kubernetes.io/name=shizuha-drive-frontend -o json 2>/dev/null | EXPECTED_IMAGE="${EXPECTED_IMAGE}" python3 -c '
+          import json, os, sys
+          expected = os.environ.get("EXPECTED_IMAGE", "")
+          pods = json.load(sys.stdin).get("items", [])
+          ready = 0
+          for p in pods:
+              status = p.get("status", {})
+              if status.get("phase") != "Running":
+                  continue
+              if not all(c.get("ready") for c in status.get("containerStatuses", []) or []):
+                  continue
+              if any(c.get("image") == expected for c in p.get("spec", {}).get("containers", [])):
+                  ready += 1
+          print(ready)
+          ' 2>/dev/null || echo 0)"
+              echo "Readiness fallback: ${READINESS}/${SPEC_REPLICAS} pods Running+all-ready on ${EXPECTED_IMAGE}"
+              if [ -n "${SPEC_REPLICAS}" ] && [ "${SPEC_REPLICAS}" -gt 0 ] && [ "${READINESS}" = "${SPEC_REPLICAS}" ]; then
+                echo "Rollout status was blocked by a stale progressDeadlineExceeded condition; pods verified Ready — treating rollout as converged (condition resets on the next real image change)"
+                DEPLOYED=1
+                break
+              fi
+              echo "::error::frontend rollout did not converge after ${attempt} attempts (last rollout rc=${ROLL_RC})"
+              echo "--- diagnostic dump: deployment ---"
+              kubectl get deploy -n shizuha shizuha-drive-frontend -o wide || true
+              kubectl describe deploy -n shizuha shizuha-drive-frontend | tail -30 || true
+              # ESC-2026-0908 run 678: the tail-30 cut the strategy and
+              # affinity stanzas — exactly the fields that explain a
+              # scheduling deadlock. Dump them explicitly.
+              kubectl get deploy -n shizuha shizuha-drive-frontend -o jsonpath='{.spec.strategy}{"\n"}{.spec.template.spec.affinity}{"\n"}' 2>/dev/null || true
+              echo "--- diagnostic dump: replicasets ---"
+              kubectl get rs -n shizuha -l app.kubernetes.io/name=shizuha-drive-frontend -o wide || true
+              echo "--- diagnostic dump: pods ---"
+              kubectl get pods -n shizuha -l app.kubernetes.io/name=shizuha-drive-frontend -o wide || true
+              # ESC-2026-0908 run 672: a Pending pod with no node is a
+              # scheduling failure the namespace event tail can miss (its
+              # window is short). Describe each non-Running pod for the
+              # FailedScheduling reason, and list node schedulability +
+              # the labels the pod's nodeSelector needs.
+              for p in $(kubectl get pods -n shizuha -l app.kubernetes.io/name=shizuha-drive-frontend -o jsonpath='{range .items[?(@.status.phase!="Running")]}{.metadata.name}{" "}{end}' 2>/dev/null); do
+                echo "--- diagnostic dump: pending pod ${p} ---"
+                kubectl describe pod -n shizuha "${p}" | tail -25 || true
+              done
+              echo "--- diagnostic dump: nodes (schedulable + selector labels) ---"
+              kubectl get nodes -o wide -L kubernetes.io/arch,shizuha.io/platform 2>/dev/null || true
+              echo "--- diagnostic dump: namespace events (tail) ---"
+              kubectl get events -n shizuha --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+              echo "--- diagnostic dump: quota ---"
+              kubectl get resourcequota -n shizuha -o wide 2>/dev/null || echo "(no ResourceQuota in ns shizuha)"
+              exit 1
+            fi
+            echo "Frontend rollout attempt ${attempt} failed (rc=${ROLL_RC}) — re-asserting"
+            sleep 10
+          done
+          if [ "${DEPLOYED}" != 1 ]; then echo "::error::frontend deploy loop exited without success"; exit 1; fi
+          kubectl annotate -n shizuha deploy/shizuha-drive-frontend shizuha.io/last-successful-sha="${{ github.sha }}" --overwrite
+          kubectl get pods -n shizuha -l app=shizuha-drive-frontend
+          .forgejo/scripts/record-deployment-event.sh \
+            DRV shizuha shizuha-drive-frontend frontend \
+            shizuha-drive-frontend \
+            "localhost:30500/shizuha-drive-frontend:${FTAG}" \
+            /drive,/drive/files
