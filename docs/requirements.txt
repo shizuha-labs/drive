@@ -1,0 +1,13 @@
+# Sphinx documentation dependencies
+sphinx>=7.0
+sphinx-rtd-theme>=2.0
+sphinxcontrib-httpdomain>=1.8
+myst-parser>=2.0
+sphinx-autobuild>=2024.0
+sphinx-copybutton>=0.5
+
+# Security floors (transitively resolved in this graph):
+# h11>=0.16.0 — GHSA-vqfr-h8mv-ghfj (chunked-body parsing / request smuggling), PLAT-4304
+# idna>=3.15 — GHSA-65pc-fj4g-8rjx (idna.encode() resource exhaustion), PLAT-4305
+h11>=0.16.0
+idna>=3.15

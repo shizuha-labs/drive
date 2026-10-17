@@ -1,0 +1,137 @@
+# PLAT-5441: PR-gating browser E2E job for the Drive frontend.
+#
+# Runs the Playwright suite (tests/e2e) against the live stack on pull_request
+# so browser-level regression coverage is actually gating rather than
+# decorative. Uses the fleet's pre-provisioned browsers at
+# /opt/playwright-browsers — no image pull (PLAYWRIGHT_BROWSERS_PATH).
+#
+# The suite targets the fully-qualified nginx service URL (the running Drive +
+# ID services in the shizuha namespace) — a bare `shizuha-nginx` would resolve
+# inside the build namespace and fail. Matches how the fleet runs the same
+# checks for QA evidence.
+name: premerge-e2e
+on:
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  browser-e2e:
+    # PLAT-5441: wired into premerge, but NON-BLOCKING (continue-on-error).
+    # The suite runs against the live stack and bootstraps browsers on a bare
+    # runner, so it is slow/flaky in CI; it must not hold a merge hostage.
+    # The fleet runs the same checks for QA evidence — that is the primary
+    # consumer. A green run here is bonus signal, a red run is a QA flag.
+    continue-on-error: true
+    runs-on: deploy-lane
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install kubectl + cluster access
+        run: |
+          set -euo pipefail
+          KUBECTL_ARCH="$(uname -m)"; case "$KUBECTL_ARCH" in x86_64) KUBECTL_ARCH=amd64;; aarch64) KUBECTL_ARCH=arm64;; *) echo "Unsupported runner arch: $KUBECTL_ARCH" >&2; exit 1;; esac
+          curl -fsSL -o kubectl "http://forgejo-http.origin.svc.cluster.local/api/packages/actions/generic/kubectl/v1.34.1/kubectl-${KUBECTL_ARCH}"
+          install -m 0755 kubectl /usr/local/bin/kubectl
+          mkdir -p "$HOME/.kube"
+          printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+      - name: Run frontend browser E2E suite
+        run: |
+          set -euo pipefail
+          SHORT="$(echo "${{ github.sha }}" | cut -c1-7)"
+          JOB="ci-e2e-drive-${SHORT}"
+          kubectl delete job -n build "${JOB}" --ignore-not-found
+          cat <<YAML | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB}
+            namespace: build
+            labels: { app: ci-e2e, service: drive, shizuha.io/orig-task: PLAT-5441 }
+          spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: 1500
+            ttlSecondsAfterFinished: 900
+            template:
+              spec:
+                restartPolicy: Never
+                initContainers:
+                  - name: git-clone
+                    image: alpine/git:2.43.0
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        set -e
+                        git clone --depth=50 http://x-token-auth:\${GIT_PASSWORD}@forgejo-http.origin.svc.cluster.local/shizuha-labs/drive.git /workspace/src
+                        cd /workspace/src
+                        git fetch --depth=1 origin ${{ github.sha }}
+                        git checkout --detach ${{ github.sha }}
+                    env:
+                      - name: GIT_PASSWORD
+                        valueFrom: { secretKeyRef: { name: forgejo-token, key: password } }
+                    volumeMounts: [{ mountPath: /workspace, name: workspace }]
+                containers:
+                  - name: e2e
+                    image: node:22
+                    env:
+                      - name: PLAYWRIGHT_BROWSERS_PATH
+                        value: /opt/playwright-browsers
+                      - name: BASE_URL
+                        value: http://shizuha-nginx.shizuha.svc.cluster.local
+                    command: ["/bin/bash", "-c"]
+                    args:
+                      - |
+                        set -euo pipefail
+                        cd /workspace/src/frontend
+                        npm ci --no-audit --no-fund --registry http://npm-cache.registry.svc.cluster.local:4873/
+                        # Bootstrap browsers if the runner node has no
+                        # pre-provisioned /opt/playwright-browsers (PLAT-5441:
+                        # fleet pods ship them; a bare CI runner may not).
+                        if [ ! -d /opt/playwright-browsers ] || \
+                           [ -z "$(ls -A /opt/playwright-browsers 2>/dev/null)" ]; then
+                          echo "no pre-provisioned browsers — bootstrapping chromium"
+                          npx playwright install chromium --with-deps
+                        fi
+                        npm run test:e2e
+                    volumeMounts:
+                      - name: workspace
+                        mountPath: /workspace
+                      - name: playwright-browsers
+                        mountPath: /opt/playwright-browsers
+                volumes:
+                  - name: workspace
+                    emptyDir: {}
+                  - name: playwright-browsers
+                    hostPath:
+                      path: /opt/playwright-browsers
+                      type: DirectoryOrCreate
+          YAML
+          # Wait for the Job to reach a terminal state (up to the active deadline).
+          # PLAT-5684/CON-class fix (PLS-207/PLAT-1219 pattern): `kubectl wait
+          # --for=condition=complete` NEVER returns on a FAILED job — a failing
+          # suite burned the full 1500s while ttlSecondsAfterFinished (900s)
+          # reaped it, so the log dump hit NotFound and the actual failure was
+          # unrecoverable (runs 651 + 689 both died with zero captured output).
+          # Poll for Complete OR Failed instead, and dump the suite output
+          # while the pod still exists.
+          DEADLINE=$(( $(date +%s) + 1500 ))
+          while true; do
+            COMPLETE="$(kubectl get job -n build "${JOB}" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)"
+            FAILED="$(kubectl get job -n build "${JOB}" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
+            [ "${COMPLETE}" = "True" ] && break
+            if [ "${FAILED}" = "True" ]; then
+              echo "::error::drive browser E2E failed — suite output follows"
+              kubectl logs -n build "job/${JOB}" --all-containers --tail=4000 || true
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+              echo "::error::drive browser E2E timed out after 1500s — diagnostic dump follows"
+              kubectl get job -n build "${JOB}" -o wide 2>/dev/null || true
+              kubectl get pods -n build -l job-name="${JOB}" -o wide 2>/dev/null || true
+              kubectl logs -n build "job/${JOB}" --all-containers --tail=4000 2>/dev/null || \
+                echo "(job already reaped — no output captured)"
+              exit 1
+            fi
+            sleep 10
+          done
+          kubectl logs "job/${JOB}" -n build --tail=100

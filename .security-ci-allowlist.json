@@ -1,0 +1,14 @@
+{
+  "_comment": "Accepted security-ci false positives. Each entry is scoped to a stable source ID and records its accountable owner, reason, and ledger task.",
+  "allowlist": [
+    {
+      "source_id": "security-ci:72f61c98032b46dfaf0202f3",
+      "tool": "semgrep",
+      "rule": "python.jwt.security.jwt-hardcode.jwt-python-hardcoded-secret",
+      "path_contains": "mcp-server/test_token_verifier.py",
+      "owner": "security",
+      "reason": "Accepted false positive (PLAT-5808; ledgers PLAT-5775 / PLAT-6123). The literal secret is a malicious HS256 negative-control fixture in test_hs256_shared_secret_token_is_rejected, which proves the production RS256/JWKS-only verifier rejects shared-secret tokens.",
+      "ledger_task": "PLAT-6123"
+    }
+  ]
+}

@@ -1,0 +1,162 @@
+/* Custom CSS for Shizuha Drive Documentation */
+
+/* Primary brand colors */
+:root {
+    --primary-color: #6366f1;
+    --primary-dark: #4f46e5;
+    --primary-light: #818cf8;
+    --accent-color: #10b981;
+    --code-background: #1e293b;
+}
+
+/* Navigation customization */
+.wy-side-nav-search {
+    background-color: var(--primary-color) !important;
+}
+
+.wy-side-nav-search a {
+    color: #ffffff !important;
+}
+
+.wy-side-nav-search input[type=text] {
+    border-color: var(--primary-dark);
+}
+
+/* Link colors */
+.wy-menu-vertical a:hover {
+    background-color: var(--primary-light) !important;
+}
+
+.rst-content a {
+    color: var(--primary-color);
+}
+
+.rst-content a:hover {
+    color: var(--primary-dark);
+}
+
+/* Code blocks */
+.rst-content code.literal {
+    background-color: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    color: var(--primary-dark);
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.rst-content pre.literal-block,
+.rst-content div[class^="highlight"] pre {
+    background-color: var(--code-background);
+    border-radius: 6px;
+}
+
+/* Tables */
+.rst-content table.docutils {
+    border-collapse: collapse;
+}
+
+.rst-content table.docutils th {
+    background-color: var(--primary-color);
+    color: white;
+}
+
+.rst-content table.docutils td,
+.rst-content table.docutils th {
+    border: 1px solid #e2e8f0;
+    padding: 8px 12px;
+}
+
+.rst-content table.docutils tr:nth-child(even) {
+    background-color: #f8fafc;
+}
+
+/* Admonitions */
+.rst-content .admonition {
+    border-radius: 6px;
+    border-left-width: 4px;
+}
+
+.rst-content .admonition.note {
+    background-color: #eff6ff;
+    border-left-color: #3b82f6;
+}
+
+.rst-content .admonition.warning {
+    background-color: #fef3c7;
+    border-left-color: #f59e0b;
+}
+
+.rst-content .admonition.danger {
+    background-color: #fef2f2;
+    border-left-color: #ef4444;
+}
+
+.rst-content .admonition.tip {
+    background-color: #ecfdf5;
+    border-left-color: var(--accent-color);
+}
+
+/* HTTP method badges */
+.rst-content .http-get {
+    background-color: #22c55e;
+    color: white;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: bold;
+}
+
+.rst-content .http-post {
+    background-color: #3b82f6;
+    color: white;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: bold;
+}
+
+.rst-content .http-put {
+    background-color: #f59e0b;
+    color: white;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: bold;
+}
+
+.rst-content .http-delete {
+    background-color: #ef4444;
+    color: white;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: bold;
+}
+
+/* Architecture diagrams */
+.rst-content pre.literal-block {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    line-height: 1.4;
+}
+
+/* Footer */
+footer {
+    background-color: #f8fafc;
+    border-top: 1px solid #e2e8f0;
+}
+
+/* Mobile responsiveness */
+@media screen and (max-width: 768px) {
+    .wy-nav-content {
+        padding: 1rem;
+    }
+
+    .rst-content table.docutils {
+        font-size: 0.9rem;
+    }
+}
+
+/* Copy button for code blocks */
+.copybtn {
+    background-color: var(--primary-color) !important;
+}
+
+.copybtn:hover {
+    background-color: var(--primary-dark) !important;
+}
