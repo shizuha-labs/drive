@@ -43,7 +43,10 @@ jobs:
           "$UV_BOOTSTRAP/bin/uv" export --quiet --frozen --no-dev --no-emit-project \
             --format requirements.txt --output-file /tmp/ci-requirements.txt
           rm -rf .venv
-          "$UV_BOOTSTRAP/bin/uv" venv --python python3 .venv
+          # Pillow 13 (CVE-2026-112403) requires Python >=3.11. The deploy-lane
+          # image's python3 is 3.10, which cannot install the locked wheels.
+          "$UV_BOOTSTRAP/bin/uv" python install 3.11
+          "$UV_BOOTSTRAP/bin/uv" venv --python 3.11 .venv
           timeout 600 env UV_CACHE_DIR=/tmp/uvc UV_HTTP_TIMEOUT=60 \
             UV_HTTP_RETRIES=10 UV_CONCURRENT_DOWNLOADS=4 \
             "$UV_BOOTSTRAP/bin/uv" pip sync \
