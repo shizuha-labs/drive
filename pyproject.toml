@@ -5,7 +5,7 @@ description = "Shizuha Drive file service"
 requires-python = ">=3.11"
 dependencies = [
     "Django>=5.2,<5.3",
-    "djangorestframework>=3.14",
+    "djangorestframework>=3.18.2",  # PLAT-12344: CVE-2026-114137 (TokenProxy token revocation); floor 3.14 predates the fix
     "django-cors-headers>=4.0",
     "django-filter>=23.0",
     "gunicorn>=21.0",
