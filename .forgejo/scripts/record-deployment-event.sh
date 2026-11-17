@@ -188,13 +188,20 @@ if [ "$DRY_RUN" != "1" ]; then
     exit 1
   }
   login_payload="$(PULSE_USERNAME="$PULSE_USERNAME" PULSE_PASSWORD="$PULSE_PASSWORD" python3 -c 'import json,os; print(json.dumps({"username":os.environ["PULSE_USERNAME"],"password":os.environ["PULSE_PASSWORD"]}))')"
-  login_response="$(curl -fsS \
+  # Fail loud with status + body (PLAT-13526): a bare curl exit code made a
+  # 403-vs-401 split impossible for 23h (drive run 1121/1127 — five bare
+  # "curl: (22) 403" lines, no diagnostics, rollout actually green).
+  login_http="$(curl -sS \
     --retry 4 --retry-all-errors --retry-delay 2 --retry-max-time 75 \
     --connect-timeout 5 --max-time 15 \
-    -H 'Content-Type: application/json' -d "$login_payload" "$ID_LOGIN_URL")" || {
-      echo "::error::ID login failed while minting a fresh Pulse access token" >&2
-      exit 1
-    }
+    -H 'Content-Type: application/json' -d "$login_payload" \
+    -w '%{http_code}' -o "${RUNNER_TEMP:-/tmp}/de-event-login-body.txt" \
+    "$ID_LOGIN_URL")" || true
+  if [ "${login_http:0:1}" != "2" ]; then
+    echo "::error::ID login failed while minting a fresh Pulse access token (HTTP ${login_http:-none}); body: $(head -c 300 "${RUNNER_TEMP:-/tmp}/de-event-login-body.txt" 2>/dev/null)" >&2
+    exit 1
+  fi
+  login_response="$(cat "${RUNNER_TEMP:-/tmp}/de-event-login-body.txt")"
   PULSE_TOKEN="$(printf '%s' "$login_response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tokens"]["access"])')"
   unset PULSE_PASSWORD login_payload login_response
   [ -n "$PULSE_TOKEN" ] || {
@@ -257,14 +264,22 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 IDEMPOTENCY_KEY="$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.load(sys.stdin)["idempotency_key"])')"
-response="$(curl -fsS \
+# Fail loud with status + body (PLAT-13526): under set -e a bare failing
+# assignment aborted the script with zero diagnostics (drive run 1121/1127).
+ingest_http="$(curl -sS \
   --retry 4 --retry-all-errors --retry-delay 2 --retry-max-time 150 \
   --connect-timeout 5 --max-time 30 -X POST \
   -H "Authorization: Bearer ${PULSE_TOKEN}" \
   -H "Idempotency-Key: ${IDEMPOTENCY_KEY}" \
   -H 'Content-Type: application/json' \
   -d "$payload" \
-  "${PULSE_URL}/api/deployment-events/ingest/")"
+  -w '%{http_code}' -o "${RUNNER_TEMP:-/tmp}/de-event-ingest-body.txt" \
+  "${PULSE_URL}/api/deployment-events/ingest/")" || true
+if [ "${ingest_http:0:1}" != "2" ]; then
+  echo "::error::Pulse DeploymentEvent ingest failed (HTTP ${ingest_http:-none}); body: $(head -c 300 "${RUNNER_TEMP:-/tmp}/de-event-ingest-body.txt" 2>/dev/null)" >&2
+  exit 1
+fi
+response="$(cat "${RUNNER_TEMP:-/tmp}/de-event-ingest-body.txt")"
 unset PULSE_TOKEN IDEMPOTENCY_KEY payload
 printf '%s' "$response" | python3 -c '
 import json, sys
@@ -290,3 +305,4 @@ print("Pulse DeploymentEvent {} state={} pr_numbers={} source_task_keys={} qa_ta
     row["id"], row["state"], prs, tasks, row.get("qa_task_key")
 ))
 '
+

@@ -32,6 +32,16 @@ jobs:
           KUBECTL_ARCH="$(uname -m)"; case "$KUBECTL_ARCH" in x86_64) KUBECTL_ARCH=amd64;; aarch64) KUBECTL_ARCH=arm64;; *) echo "Unsupported runner arch: $KUBECTL_ARCH" >&2; exit 1;; esac
           curl -fsSL -o kubectl "http://forgejo-http.origin.svc.cluster.local/api/packages/actions/generic/kubectl/v1.34.1/kubectl-${KUBECTL_ARCH}"
           install -m 0755 kubectl /usr/local/bin/kubectl
+          # PLAT-9177 fail-loud (deploy-lane precedent): an EMPTY org secret
+          # degrades silently — the empty kubeconfig makes every later kubectl
+          # call fall back to localhost:8080 and the job fails with a
+          # connection-refused signature that looks like a runner fault, not a
+          # secret-presence fault. Fail here, by name, instead.
+          if [ -z "${{ secrets.KUBE_CONFIG_B64 }}" ]; then
+            echo "::error::PLAT-9177: KUBE_CONFIG_B64 is EMPTY on this runner — org-secret delivery to Actions runners is broken (PLAT-9173/PLAT-9091). Failing fast BEFORE cluster access so the signature is 'secret-presence', not 'kubectl localhost:8080 refused'."
+            exit 1
+          fi
+          echo "KUBE_CONFIG_B64: present"
           mkdir -p "$HOME/.kube"
           printf '%s' "${{ secrets.KUBE_CONFIG_B64 }}" | base64 -d > "$HOME/.kube/config"
           chmod 600 "$HOME/.kube/config"
