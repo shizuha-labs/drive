@@ -335,8 +335,20 @@ jobs:
           if [ "${DEPLOYED}" != 1 ]; then echo "::error::frontend deploy loop exited without success"; exit 1; fi
           kubectl annotate -n shizuha deploy/shizuha-drive-frontend shizuha.io/last-successful-sha="${{ github.sha }}" --overwrite
           kubectl get pods -n shizuha -l app=shizuha-drive-frontend
-          .forgejo/scripts/record-deployment-event.sh \
+          # PLAT-12954 made DeploymentEvent ingest staff-only by policy, so a
+          # non-staff deploy-lane token 403s here permanently. The recorder is
+          # post-rollout evidence, not part of the rollout transaction: the
+          # rollout is already verified converged + smoke-passed and
+          # last-successful-sha annotated before this line. Match the fleet
+          # pattern (pulse repo deploy.yml, PLS-684/PLS-1320): keep the
+          # diagnostics fail-loud in the log without rewriting a converged
+          # deployment as failed (the drive@8414cea doctrine: red-lighting a
+          # live-converged ship on bookkeeping burns ci-redispatch ANDON
+          # budget on bookkeeping, not a failed roll).
+          if ! .forgejo/scripts/record-deployment-event.sh \
             DRV shizuha shizuha-drive-frontend frontend \
             shizuha-drive-frontend \
             "localhost:30500/shizuha-drive-frontend:${FTAG}" \
-            /drive,/drive/files
+            /drive,/drive/files; then
+            echo "::warning::frontend rollout converged and smoke passed but DeploymentEvent recording failed (post-rollout evidence lane; ingest is staff-only per PLAT-12954)"
+          fi
