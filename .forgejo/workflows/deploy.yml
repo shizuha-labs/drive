@@ -474,7 +474,12 @@ jobs:
           LIVE="$(kubectl get deploy -n shizuha shizuha-drive -o jsonpath='{.spec.template.spec.containers[0].image}')"
           echo "Live: ${LIVE}"; echo "${LIVE}" | grep -q "${TAG}" && echo "OK multi-arch ${TAG}" || { echo "::error::image mismatch"; exit 1; }
           kubectl annotate -n shizuha deploy/shizuha-drive shizuha.io/last-successful-sha="${{ github.sha }}" --overwrite
-          .forgejo/scripts/record-deployment-event.sh \
+          # Same post-rollout-evidence policy as deploy-frontend.yml: the
+          # recorder must not rewrite a converged, smoke-passed deployment as
+          # failed (PLAT-12954 staff-only ingest 403s the lane token).
+          if ! .forgejo/scripts/record-deployment-event.sh \
             DRV shizuha shizuha-drive backend shizuha-drive \
             "localhost:30500/shizuha-drive:${TAG}" \
-            /drive,/drive/,/drive/files
+            /drive,/drive/,/drive/files; then
+            echo "::warning::backend rollout converged but DeploymentEvent recording failed (post-rollout evidence lane; ingest is staff-only per PLAT-12954)"
+          fi
