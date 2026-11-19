@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Settings as SettingsIcon, HardDrive, Trash2, RefreshCw } from 'lucide-react'
 import { getStorageQuota, emptyTrash } from '../services/api'
 import LoadingSpinner from '../components/LoadingSpinner'
+import { useAuth } from '../contexts/AuthContext'
 import { useState } from 'react'
 
 function formatBytes(bytes) {
@@ -15,6 +16,11 @@ function formatBytes(bytes) {
 export default function Settings() {
   const queryClient = useQueryClient()
   const [emptying, setEmptying] = useState(false)
+  // DRV-84: Empty Trash is a staff-only hard purge (backend `trash/empty/`
+  // enforces is_staff). Ordinary owners wait for the 30-day auto-purge instead
+  // of being shown a dead 403 control.
+  const { user } = useAuth()
+  const isStaff = !!user?.is_staff
 
   const { data: quota, isLoading } = useQuery({
     queryKey: ['quota'],
@@ -125,27 +131,29 @@ export default function Settings() {
           </h2>
 
           <p className="text-sm text-gray-600 mb-4">
-            Files in trash are automatically deleted after 30 days. You can empty the trash
-            to immediately free up storage space.
+            Files in trash are automatically deleted after 30 days
+            {isStaff ? '. You can empty the trash to immediately free up storage space.' : '; auto-purge frees the space then.'}
           </p>
 
-          <button
-            onClick={handleEmptyTrash}
-            disabled={emptying}
-            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center"
-          >
-            {emptying ? (
-              <>
-                <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                Emptying...
-              </>
-            ) : (
-              <>
-                <Trash2 className="h-4 w-4 mr-2" />
-                Empty Trash
-              </>
-            )}
-          </button>
+          {isStaff && (
+            <button
+              onClick={handleEmptyTrash}
+              disabled={emptying}
+              className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center"
+            >
+              {emptying ? (
+                <>
+                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                  Emptying...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Empty Trash
+                </>
+              )}
+            </button>
+          )}
         </div>
 
         {/* About Section */}

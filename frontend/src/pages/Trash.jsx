@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Trash2, File, FileText, Image, Film, Music, Archive, Code, RotateCcw, X, Folder } from 'lucide-react'
 import { getTrashedFiles, restoreFromTrash, deleteForever, restoreFolderFromTrash } from '../services/api'
 import LoadingSpinner from '../components/LoadingSpinner'
+import { useAuth } from '../contexts/AuthContext'
 import { formatDistanceToNow } from 'date-fns'
 import { useState } from 'react'
 
@@ -20,6 +21,11 @@ const fileTypeIcons = {
 export default function Trash() {
   const queryClient = useQueryClient()
   const [selectedFiles, setSelectedFiles] = useState([])
+  // DRV-84: file/folder hard-delete ("Delete forever") and Empty Trash are
+  // staff-only per the backend purge/empty policy. Ordinary owners can Restore
+  // (a non-staff action) but must not be shown dead hard-delete affordances.
+  const { user } = useAuth()
+  const isStaff = !!user?.is_staff
 
   // DRV-75: GET /trash/ returns { files: [...], folders: [...] } — an OBJECT.
   // This previously bound the envelope straight to `files`, so `files.length`
@@ -116,13 +122,15 @@ export default function Trash() {
               <RotateCcw className="h-4 w-4 mr-1" />
               Restore ({selectedFiles.length})
             </button>
-            <button
-              onClick={handleDeleteSelected}
-              className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center"
-            >
-              <X className="h-4 w-4 mr-1" />
-              Delete Forever ({selectedFiles.length})
-            </button>
+            {isStaff && (
+              <button
+                onClick={handleDeleteSelected}
+                className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center"
+              >
+                <X className="h-4 w-4 mr-1" />
+                Delete Forever ({selectedFiles.length})
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -222,20 +230,23 @@ export default function Trash() {
                       onClick={() => restoreMutation.mutate(file.id)}
                       className="p-2 rounded-full hover:bg-gray-100"
                       title="Restore"
+                      data-testid="file-restore"
                     >
                       <RotateCcw className="h-5 w-5 text-gray-500" />
                     </button>
-                    <button
-                      onClick={() => {
-                        if (window.confirm('Permanently delete this file?')) {
-                          deleteMutation.mutate(file.id)
-                        }
-                      }}
-                      className="p-2 rounded-full hover:bg-gray-100"
-                      title="Delete forever"
-                    >
-                      <X className="h-5 w-5 text-red-500" />
-                    </button>
+                    {isStaff && (
+                      <button
+                        onClick={() => {
+                          if (window.confirm('Permanently delete this file?')) {
+                            deleteMutation.mutate(file.id)
+                          }
+                        }}
+                        className="p-2 rounded-full hover:bg-gray-100"
+                        title="Delete forever"
+                      >
+                        <X className="h-5 w-5 text-red-500" />
+                      </button>
+                    )}
                   </div>
                 </div>
               )
