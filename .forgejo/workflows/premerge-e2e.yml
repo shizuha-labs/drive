@@ -85,7 +85,7 @@ jobs:
                     image: node:22
                     env:
                       - name: PLAYWRIGHT_BROWSERS_PATH
-                        value: /opt/playwright-browsers
+                        value: /workspace/pw-browsers
                       - name: BASE_URL
                         value: http://shizuha-nginx.shizuha.svc.cluster.local
                     command: ["/bin/bash", "-c"]
@@ -94,27 +94,31 @@ jobs:
                         set -euo pipefail
                         cd /workspace/src/frontend
                         npm ci --no-audit --no-fund --registry http://npm-cache.registry.svc.cluster.local:4873/
-                        # Bootstrap browsers if the runner node has no
-                        # pre-provisioned /opt/playwright-browsers (PLAT-5441:
-                        # fleet pods ship them; a bare CI runner may not).
-                        if [ ! -d /opt/playwright-browsers ] || \
-                           [ -z "$(ls -A /opt/playwright-browsers 2>/dev/null)" ]; then
-                          echo "no pre-provisioned browsers — bootstrapping chromium"
-                          npx playwright install chromium --with-deps
-                        fi
+                        # DRV-84 (run 1146): the runner's pre-provisioned
+                        # chromium can lack its system libraries (libnspr4.so),
+                        # and a populated-but-broken hostPath silently passes
+                        # this guard. Provision job-local browsers every run —
+                        # reproducible and independent of node state.
+                        npx playwright install --with-deps chromium
+                        # Lane design: this suite is a PROD regression lane
+                        # (BASE_URL = deployed stack; red here is a QA flag,
+                        # not a merge gate). PR-preview serving exists as an
+                        # opt-in tool: frontend/scripts/e2e-preview.mjs (run
+                        # `node scripts/e2e-preview.mjs` with E2E_UPSTREAM set,
+                        # then BASE_URL=http://127.0.0.1:4173). Run 1148 showed
+                        # the shared Shizuha ID SPA cannot be faithfully
+                        # proxied blind, so preview stays opt-in, not default.
                         npm run test:e2e
                     volumeMounts:
                       - name: workspace
                         mountPath: /workspace
-                      - name: playwright-browsers
-                        mountPath: /opt/playwright-browsers
+                      - name: pw-browsers
+                        mountPath: /workspace/pw-browsers
                 volumes:
                   - name: workspace
                     emptyDir: {}
-                  - name: playwright-browsers
-                    hostPath:
-                      path: /opt/playwright-browsers
-                      type: DirectoryOrCreate
+                  - name: pw-browsers
+                    emptyDir: {}
           YAML
           # Wait for the Job to reach a terminal state (up to the active deadline).
           # PLAT-5684/CON-class fix (PLS-207/PLAT-1219 pattern): `kubectl wait

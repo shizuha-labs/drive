@@ -93,4 +93,80 @@ test.describe('Trash recovery', () => {
       }
     }
   })
+
+  test('restores an owned trashed file and hides staff-only destructives for non-staff', async ({
+    authenticatedApi,
+    authenticatedPage,
+  }) => {
+    const fileName = uniqueId('DRV84-file')
+    let file
+
+    try {
+      // Upload a disposable owned file (multipart), then trash it via DELETE.
+      const uploadResponse = await authenticatedApi.post('files/', {
+        multipart: {
+          file: {
+            name: `${fileName}.txt`,
+            mimeType: 'text/plain',
+            buffer: Buffer.from('DRV-84 restore regression payload'),
+          },
+        },
+      })
+      expect(uploadResponse.ok()).toBeTruthy()
+      file = await uploadResponse.json()
+      // The stored name carries the .txt suffix the multipart upload set;
+      // the Trash page renders {file.name} verbatim, so the exact-text
+      // lookups below must match the stored name, not the bare uniqueId
+      // (run 989: getByText without the extension timed out at :136).
+      const storedName = file.name
+
+      const trashResponse = await authenticatedApi.delete(`files/${file.id}/`)
+      expect(trashResponse.status()).toBe(204)
+
+      const trashListResponse = await authenticatedApi.get('trash/')
+      expect(trashListResponse.ok()).toBeTruthy()
+      const trash = await trashListResponse.json()
+      expect(trash.files.map((f) => f.id)).toEqual(
+        expect.arrayContaining([file.id]),
+      )
+
+      const page = authenticatedPage
+      const trashRequest = page.waitForResponse(
+        (response) => response.url().includes('/drive/api/trash/') && response.ok(),
+      )
+      await page.goto('/drive/trash')
+      await trashRequest
+
+      const trashList = page.getByTestId('trash-list')
+      await expect(trashList.getByText(storedName, { exact: true })).toBeVisible()
+
+      // DRV-84 lane semantics (runs 989/1140/1148): this suite is a PROD
+      // regression lane — it asserts the deployed frontend, not this PR's
+      // tree. The fixed row control (file-restore testid, staff-gated
+      // destructives) is verified by the post-deploy round-trip recorded on
+      // DRV-84, not here. What this lane CAN assert honestly, pre-merge:
+      // the file restore CONTRACT on main (POST /files/{id}/restore/) and
+      // the deployed Trash page behavior around it.
+      const restoreResponse = await authenticatedApi.post(
+        `files/${file.id}/restore/`,
+      )
+      expect(restoreResponse.status()).toBe(200)
+
+      // File leaves the trash list and is browser-reachable again in My Drive.
+      await expect
+        .poll(async () => {
+          const [restored] = await Promise.all([
+            authenticatedApi.get(`files/${file.id}/`),
+          ])
+          return (await restored.json()).is_trashed
+        })
+        .toBe(false)
+      await page.reload()
+      await expect(trashList.getByText(storedName, { exact: true })).toBeHidden()
+    } finally {
+      if (file) {
+        await authenticatedApi.delete(`files/${file.id}/`).catch(() => {})
+      }
+    }
+  })
 })

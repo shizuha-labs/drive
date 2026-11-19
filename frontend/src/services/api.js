@@ -278,11 +278,17 @@ export const getPublicShare = (token, password) =>
 // Trash
 export const getTrash = () => api.get('/trash/').then((r) => r.data)
 export const getTrashedFiles = () => api.get('/trash/').then((r) => r.data)
-export const restoreFromTrash = (id) => api.post(`/trash/${id}/restore/`).then((r) => r.data)
+// DRV-84: files restore via the FileViewSet detail action (POST /files/{id}/restore/),
+// NOT a nonexistent /trash/{id}/restore/ route (TrashViewSet only exposes
+// list+empty; the file restore contract lives on FileViewSet.restore).
+export const restoreFromTrash = (id) => api.post(`/files/${id}/restore/`).then((r) => r.data)
 // DRV-75: folders restore via the FolderViewSet detail action, not the trash route.
 export const restoreFolderFromTrash = (id) => api.post(`/folders/${id}/restore/`).then((r) => r.data)
-export const deleteFolderForever = (id) => api.delete(`/folders/${id}/permanent/`)
-export const deleteForever = (id) => api.delete(`/trash/${id}/permanent/`)
+// DRV-84: files hard-delete via the file purge contract (POST /files/{id}/purge/,
+// staff-only by intended policy) — the /trash/{id}/permanent/ route never existed.
+// DRV-84 P3: deleteFolderForever (DELETE /folders/{id}/permanent/, no backend route)
+// removed as dead code.
+export const deleteForever = (id) => api.post(`/files/${id}/purge/`).then((r) => r.data)
 export const emptyTrash = () => api.post('/trash/empty/').then((r) => r.data)
 
 // Activity
